@@ -1,43 +1,32 @@
 import abc
-from typing import Any
 import numpy as np
 
 
-class GDMethod(abc.ABC):
-    """
-    Интерфейс для метода градиентного спуска.
-
-    Методы получают X_b (матрица с колонкой единиц), y и текущие theta.
-    calc_grad должен возвращать усреднённый по батчу градиент (т.е. уже делённый на m),
-    чтобы шаг обновления был просто theta -= lr * grad.
-    """
-
+class BaseLoss(abc.ABC):
     @abc.abstractmethod
-    def calc_loss(self, X_b: np.ndarray, y: np.ndarray, theta: np.ndarray) -> float:
+    def calc_loss(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
         raise NotImplementedError
 
     @abc.abstractmethod
-    def calc_grad(self, X_b: np.ndarray, y: np.ndarray, theta: np.ndarray) -> np.ndarray:
+    def calc_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
         raise NotImplementedError
 
 
-class BatchGD(GDMethod):
-    """Простая реализация пакетного градиентного спуска."""
-
-    def calc_loss(self, X_b: np.ndarray, y: np.ndarray, theta: np.ndarray) -> float:
-        preds = X_b.dot(theta)
+class MSELoss(BaseLoss):
+    def calc_loss(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
+        preds = X.dot(w)
         mse = np.mean((preds - y) ** 2)
         return 0.5 * mse
 
-    def calc_grad(self, X_b: np.ndarray, y: np.ndarray, theta: np.ndarray) -> np.ndarray:
-        m = X_b.shape[0]
-        preds = X_b.dot(theta)
+    def calc_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
+        m = X.shape[0]
+        preds = X.dot(w)
         err = preds - y
-        grad = X_b.T.dot(err) / float(m)
+        grad = X.T.dot(err) / float(m)
         return grad
 
 
-class SGD(GDMethod):
+class SGD(BaseLoss):
     """
     Стохастический градиентный спуск.
     Каждый вызов calc_grad выбирает один случайный пример и возвращает градиент по нему.
@@ -48,20 +37,20 @@ class SGD(GDMethod):
     def __init__(self, rng: np.random.Generator | None = None):
         self.rng = rng if rng is not None else np.random.default_rng()
 
-    def calc_loss(self, X_b: np.ndarray, y: np.ndarray, theta: np.ndarray) -> float:
+    def calc_loss(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
         # для оценки loss используем полный набор
-        preds = X_b.dot(theta)
+        preds = X.dot(w)
         mse = np.mean((preds - y) ** 2)
         return 0.5 * mse
 
-    def calc_grad(self, X_b: np.ndarray, y: np.ndarray, theta: np.ndarray) -> np.ndarray:
-        m = X_b.shape[0]
+    def calc_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
+        m = X.shape[0]
         if m == 0:
-            return np.zeros_like(theta)
+            return np.zeros_like(w)
         idx = int(self.rng.integers(0, m))
-        Xi = X_b[idx:idx+1]        # shape (1, n+1)
+        Xi = X[idx:idx+1]        # shape (1, n+1)
         yi = y[idx:idx+1]         # shape (1,)
-        pred = Xi.dot(theta)      # shape (1,)
+        pred = Xi.dot(w)      # shape (1,)
         err = pred - yi           # shape (1,)
         grad = Xi.T.dot(err)      # shape (n+1, 1)
         # grad для одного примера — усреднять на 1 не нужно, возвращаем одномерный вектор
@@ -73,7 +62,7 @@ class LinearRegression:
     Общий класс линейной регрессии, принимает реализацию GDMethod.
     """
 
-    def __init__(self, method: GDMethod, lr: float = 0.01, epochs: int = 1000):
+    def __init__(self, method: BaseLoss, lr: float = 0.01, epochs: int = 1000):
         self.method = method
         self.lr = float(lr)
         self.epochs = int(epochs)
@@ -134,7 +123,7 @@ if __name__ == "__main__":
     y = true_intercept + X.dot(true_coef) + rng.normal(0, 0.5, size=200)
 
     # batch
-    batch_method = BatchGD()
+    batch_method = MSELoss()
     model_batch = LinearRegression(method=batch_method, lr=0.1, epochs=300)
     model_batch.fit(X, y)
     preds_batch = model_batch.predict(X)
@@ -148,3 +137,18 @@ if __name__ == "__main__":
     preds_sgd = model_sgd.predict(X)
     print("sgd theta:", model_sgd.theta)
     print("sgd R2:", model_sgd.r2_score(X, y))
+
+    np.random.seed(42) # для воспроизводимости результатов
+    X = 2 * np.random.rand(100, 1)  # 100 примеров, 1 признак
+    y = 4 + 3 * X + np.random.randn(100, 1) # Истинные веса: w=3, b=4
+
+    model_batch = LinearRegression(method=batch_method, lr=0.1, epochs=300)
+    model_batch.fit(X, y)
+    print("batch 1 theta:", model_batch.theta)
+    print("batch 1 R2:", model_batch.r2_score(X, y))
+
+    sgd_method = SGD(rng=np.random.default_rng(1))
+    model_sgd = LinearRegression(method=sgd_method, lr=0.01, epochs=5000)
+    model_sgd.fit(X, y)
+    print("sgd 1 theta:", model_sgd.theta)
+    print("sgd 1 R2:", model_sgd.r2_score(X, y))
