@@ -1,6 +1,7 @@
 import abc
 from typing import List
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 class BaseLoss(abc.ABC):
@@ -68,10 +69,9 @@ class LinearRegression:
     Общий класс линейной регрессии, принимает реализацию GDMethod.
     """
 
-    def __init__(self, loss: BaseLoss, lr: float = 0.1, epochs: int = 1000):
+    def __init__(self, loss: BaseLoss, lr: float = 0.1):
         self.loss = loss
         self.lr = lr
-        self.epochs = epochs
 
         self.w: np.ndarray | None = None
         self.history: list[float] = []
@@ -91,15 +91,30 @@ class LinearRegression:
 
         w = np.zeros(X.shape[1], dtype=float)
 
+        step = 0
+        no_change_count = 0
+        max_steps = 10000
+        best_loss = float('inf')
+        eps = 1e-12
+
         self.history = []
-        for _ in range(self.epochs):
+        while step < max_steps and no_change_count < 5:
             grad = self.loss.calc_grad(X, y, w)
             if grad.shape != w.shape:
                 raise ValueError("gradient shape mismatch")
             w = w - self.lr * grad
 
-            loss = float(self.loss.calc_loss(X, y, w))
+            loss = self.loss.calc_loss(X, y, w)
+
+            if loss < best_loss - eps:
+                best_loss = loss
+                no_change_count = 0
+            else:
+                no_change_count += 1
+
             self.history.append(loss)
+
+            step += 1
 
         self.w = w
         return self
@@ -241,16 +256,18 @@ if __name__ == "__main__":
     X = 2 * np.random.rand(100, 1)  # 100 примеров, 1 признак
     y = 4 + 3 * X + np.random.randn(100, 1) # Истинные веса: w=3, b=4
 
-    model_batch = LinearRegression(loss=batch_method, lr=0.1, epochs=300)
+    model_batch = LinearRegression(loss=batch_method, lr=0.1)
     model_batch.fit(X, y)
     print("batch 1 theta:", model_batch.w)
     print("batch 1 R2:", model_batch.r2_score(X, y))
+    print("batch 1 steps:", len(model_batch.history))
 
     sgd_method = SGD(rng=np.random.default_rng(1))
-    model_sgd = LinearRegression(loss=sgd_method, lr=0.01, epochs=5000)
+    model_sgd = LinearRegression(loss=sgd_method, lr=0.01)
     model_sgd.fit(X, y)
     print("sgd 1 theta:", model_sgd.w)
     print("sgd 1 R2:", model_sgd.r2_score(X, y))
+    print("sgd 1 steps:", len(model_sgd.history))
 
     # Создадим объект лосса
     loss = MSELoss()
@@ -307,14 +324,24 @@ if __name__ == "__main__":
     print(y.shape)
 
     loss = MSELoss()
-    w_list = gradient_descent(w_init, X, y, loss, 0.01, 100)
-    print(loss.calc_loss(X, y, w_list[0]))
-    print(loss.calc_loss(X, y, w_list[-1]))
+    w_list1 = gradient_descent(w_init, X, y, loss, 0.01, 1000)
+    w_list2 = stochastic_gradient_descent_step(w_init, X, y, loss, 0.01, 10, 0.6, 1000)
 
-    w_list = stochastic_gradient_descent(w_init, X, y, loss, 0.01, 100, 1000)
-    print(loss.calc_loss(X, y, w_list[0]))
-    print(loss.calc_loss(X, y, w_list[-1]))
+    def calc_losses(loss: BaseLoss, w_list: np.ndarray) -> List[float]:
+        losses: List[float] = []
+        for w in w_list:
+            losses.append(loss.calc_loss(X, y, w))
 
-    w_list = stochastic_gradient_descent_step(w_init, X, y, loss, 0.01, 100, 0.6, 1000)
-    print(loss.calc_loss(X, y, w_list[0]))
-    print(loss.calc_loss(X, y, w_list[-1]))
+        return losses
+
+    plt.figure(figsize=(12, 7))
+    plt.plot(calc_losses(loss, w_list1), 'r-', linewidth=2, label='gradient_descent')
+    plt.plot(calc_losses(loss, w_list2), 'b-', linewidth=2, label='stochastic_gradient_descent')
+
+    plt.title('Сравнение сходимости (логарифмическая шкала)')
+    plt.xlabel('Шаг (итерация)')
+    plt.ylabel('Ошибка (Loss)')
+    plt.yscale('log')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
