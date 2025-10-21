@@ -90,14 +90,22 @@ class MSEL2Loss(BaseLoss):
 
     def calc_loss(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
         preds = X.dot(w)
-        mse = np.mean((preds - y) ** 2) + self.coef * np.sum(w ** 2)
-        return mse
+        mse = np.mean((preds - y) ** 2)
+        w_reg = w.copy()
+        if w_reg.size > 0:
+            w_reg[0] = 0.0
+        reg_term = self.coef * np.sum(w_reg ** 2)
+        return mse + reg_term
 
     def calc_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
         m = X.shape[0]
         preds = X.dot(w)
         err = preds - y
-        grad = 2 * X.T.dot(err) / float(m) + 2 * self.coef * w
+        grad = 2 * X.T.dot(err) / float(m)
+        w_reg = w.copy()
+        if w_reg.size > 0:
+            w_reg[0] = 0.0
+        grad = grad + 2 * self.coef * w_reg
         return grad
 
 loss = MSEL2Loss(0.1)
