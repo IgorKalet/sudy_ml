@@ -93,9 +93,9 @@ class LinearRegression:
 
         step = 0
         no_change_count = 0
-        max_steps = 10000
+        max_steps = 100000
         best_loss = float('inf')
-        eps = 1e-12
+        eps = 1e-5
 
         self.history = []
         while step < max_steps and no_change_count < 5:
@@ -131,6 +131,26 @@ class LinearRegression:
         ss_res = np.sum((y - preds) ** 2)
         ss_tot = np.sum((y - y.mean()) ** 2)
         return 1.0 - ss_res / ss_tot if ss_tot != 0 else 0.0
+
+    def plot_loss(self, show=True, save_path=None):
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as e:
+            raise RuntimeError("matplotlib required for plot_loss, install with: pip install matplotlib") from e
+
+        if not self.history:
+            raise RuntimeError("history is empty, fit model first")
+
+        plt.figure()
+        plt.plot(self.history, marker=".", linewidth=0.8)
+        plt.xlabel("Step")
+        plt.ylabel("Loss (MSE)")
+        plt.title(f"Loss history")
+        plt.grid(True)
+        if save_path:
+            plt.savefig(save_path, bbox_inches="tight")
+        if show:
+            plt.show()
 
 def gradient_descent(
     w_init: np.ndarray,
