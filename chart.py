@@ -1102,3 +1102,455 @@ R2 = 1 - 0.09 / 2 = 0.955
 Замечания:
 - Поведение при константном y (SS_tot == 0) может быть изменено (например, вернуть NaN или 1.0 в зависимости от определения). Текущее поведение возвращает 0.0.
 - R² чувствителен к масштабам и выбросам; для несопоставимых моделей лучше смотреть дополнительные метрики (MAE, RMSE).
+
+IgorKalet: Как правило, в начале спуска мы хотим делать большие шаги, чтобы поскорее подойти поближе к минимуму, а позже мы уже хотим делать шаги маленькие, чтобы более точнее этого минимума достичь и не "перепрыгнуть" его. Как это дечше сделать.
+
+GitHub Copilot: Copilot took too long to get ready. Please ensure you are signed in to GitHub and that the extension `GitHub.copilot-chat` is installed and enabled.
+
+IgorKalet: Как правило, в начале спуска мы хотим делать большие шаги, чтобы поскорее подойти поближе к минимуму, а позже мы уже хотим делать шаги маленькие, чтобы более точнее этого минимума достичь и не "перепрыгнуть" его. Как это дечше сделать.
+
+GitHub Copilot: Кратко: добавил набор планировщиков шага (learning rate schedulers) и показал, как их применять — можно передать scheduler в LinearRegression или в функции gradient_descent / stochastic_gradient_descent. Scheduler — callable, принимающий номер шага (iteration) и возвращающий float lr. Рекомендации: использовать быстрый lr в начале (warmup/large lr) и затем экспоненциальное / инверсное уменьшение; для стабильности на стохастике полезен небольшой lr и/или адаптивные оптимизаторы (Adam).
+
+Ниже — предложенные изменения в файле regression.py.
+
+````python
+# ...existing code...
+import abc
+from typing import List, Callable
+import numpy as np
+
+# ----------------- new: learning rate schedulers -----------------
+class LRScheduler:
+    """Базовый класс/интерфейс: объект должен быть вызываемым и возвращать lr по шагу."""
+    def __call__(self, step: int) -> float:
+        raise NotImplementedError
+
+class ConstantLR(LRScheduler):
+    def __init__(self, lr: float):
+        self.lr = float(lr)
+    def __call__(self, step: int) -> float:
+        return self.lr
+
+class TimeDecay(LRScheduler):
+    # lr = lr0 / (1 + decay * step)
+    def __init__(self, lr0: float, decay: float):
+        self.lr0 = float(lr0); self.decay = float(decay)
+    def __call__(self, step: int) -> float:
+        return self.lr0 / (1.0 + self.decay * float(step))
+
+class ExponentialDecay(LRScheduler):
+    # lr = lr0 * exp(-k * step)
+    def __init__(self, lr0: float, k: float):
+        self.lr0 = float(lr0); self.k = float(k)
+    def __call__(self, step: int) -> float:
+        return self.lr0 * np.exp(-self.k * float(step))
+
+class StepDecay(LRScheduler):
+    # lr = lr0 * drop_rate^(floor(step / step_size))
+    def __init__(self, lr0: float, drop_rate: float = 0.5, step_size: int = 100):
+        self.lr0 = float(lr0); self.drop_rate = float(drop_rate); self.step_size = int(step_size)
+    def __call__(self, step: int) -> float:
+        return self.lr0 * (self.drop_rate ** (step // self.step_size))
+
+class InverseScaling(LRScheduler):
+    # lr = lr0 / (1 + k * step) ** power
+    def __init__(self, lr0: float, k: float = 1e-3, power: float = 0.5):
+        self.lr0 = float(lr0); self.k = float(k); self.power = float(power)
+    def __call__(self, step: int) -> float:
+        return self.lr0 / ((1.0 + self.k * float(step)) ** self.power)
+
+class CosineAnnealing(LRScheduler):
+    # cosine annealing with period T and min lr
+    def __init__(self, lr0: float, lr_min: float, T: int):
+        self.lr0 = float(lr0); self.lr_min = float(lr_min); self.T = int(T)
+    def __call__(self, step: int) -> float:
+        if self.T <= 0:
+            return self.lr0
+        x = (step % self.T) / float(self.T)
+        return self.lr_min + 0.5 * (self.lr0 - self.lr_min) * (1.0 + np.cos(np.pi * x))
+
+# helper to accept either float or scheduler
+def _make_scheduler(lr_or_sched: float | Callable[[int], float]) -> Callable[[int], float]:
+    if callable(lr_or_sched):
+        return lr_or_sched
+    return ConstantLR(float(lr_or_sched))
+
+# ...existing code...
+
+class BaseLoss(abc.ABC):
+    @abc.abstractmethod
+    def calc_loss(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def calc_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
+        raise NotImplementedError
+
+# ...existing code...
+class LinearRegression:
+    """
+    Общий класс линейной регрессии, принимает реализацию GDMethod.
+    """
+
+    def __init__(self, method: BaseLoss, lr: float = 0.01, epochs: int = 1000, lr_scheduler: Callable[[int], float] | None = None):
+        self.method = method
+        self.lr = float(lr)
+        self.epochs = int(epochs)
+        # lr_scheduler может быть callable(step)->lr или None
+        self.lr_scheduler = _make_scheduler(lr_scheduler) if lr_scheduler is not None else ConstantLR(self.lr)
+        self.theta: np.ndarray | None = None
+        self.history: list[float] = []
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "LinearRegression":
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=float).reshape(-1)
+        if X.shape[0] != y.shape[0]:
+            raise ValueError("X and y must have same number of rows")
+
+        X_b = add_bias(X)
+        n_params = X_b.shape[1]
+        theta = np.zeros(n_params, dtype=float)
+
+        self.history = []
+        for epoch in range(self.epochs):
+            lr = float(self.lr_scheduler(epoch))
+            grad = self.method.calc_grad(X_b, y, theta)
+            if grad.shape != theta.shape:
+                raise ValueError("gradient shape mismatch")
+            theta = theta - lr * grad
+
+            loss = float(self.method.calc_loss(X_b, y, theta))
+            self.history.append(loss)
+
+        self.theta = theta
+        return self
+
+# ...existing code...
+
+def gradient_descent(
+    w_init: np.ndarray,
+    X: np.ndarray,
+    y: np.ndarray,
+    loss: BaseLoss,
+    lr: float | Callable[[int], float],
+    n_iterations: int = 100000,
+) -> List[np.ndarray]:
+    """
+    Функция градиентного спуска (детерминированный / batch).
+    lr может быть константой или callable(step)->lr.
+    """
+    scheduler = _make_scheduler(lr)
+    history = []
+    w = w_init.copy()
+    for it in range(n_iterations):
+        current_lr = float(scheduler(it))
+        grad = loss.calc_grad(X, y, w)
+        w = w - current_lr * grad
+        history.append(w.copy())
+
+    return history
+
+def stochastic_gradient_descent(
+    w_init: np.ndarray,
+    X: np.ndarray,
+    y: np.ndarray,
+    loss: BaseLoss,
+    lr: float | Callable[[int], float],
+    batch_size: int,
+    n_iterations: int = 1000,
+) -> List[np.ndarray]:
+    """
+    Стохастический / мини-батч. lr может быть callable(step)->lr.
+    """
+    scheduler = _make_scheduler(lr)
+    history = []
+    w = w_init.copy()
+    m = X.shape[0]
+    for it in range(n_iterations):
+        current_lr = float(scheduler(it))
+        batch_indices = np.random.choice(m, size=batch_size, replace=False)
+        batch_X = X[batch_indices]
+        batch_y = y[batch_indices]
+        grad = loss.calc_grad(batch_X, batch_y, w)
+        w = w - current_lr * grad
+        history.append(w.copy())
+
+    return history
+
+# ...existing code...
+if __name__ == "__main__":
+    # пример использования scheduler
+    rng = np.random.default_rng(0)
+    X = 2 * rng.random((200, 2))
+    true_coef = np.array([3.0, -1.5])
+    true_intercept = 2.0
+    y = true_intercept + X.dot(true_coef) + rng.normal(0, 0.5, size=200)
+
+    loss = MSELoss()
+
+    # экспоненциальный спад
+    exp_sched = ExponentialDecay(lr0=0.1, k=0.01)
+    model = LinearRegression(method=loss, lr=0.1, epochs=300, lr_scheduler=exp_sched)
+    model.fit(X, y)
+    print("theta:", model.theta)
+    print("loss start/stop:", model.history[0], model.history[-1])
+
+    # стохастический градиент с инверсным масштабированием lr
+    inv_sched = InverseScaling(lr0=0.05, k=1e-3, power=0.6)
+    w_init = np.random.uniform(-2, 2, (X.shape[1] + 1,))
+    history = stochastic_gradient_descent(w_init, add_bias(X), y, loss, lr=inv_sched, batch_size=16, n_iterations=1000)
+    print("sgd final loss:", loss.calc_loss(add_bias(X).dot(np.eye(add_bias(X).shape[1])), y, history[-1]))  # демонстрация
+````
+
+Короткие практические советы:
+- Для классического подхода: warmup (первые 5–10 шагов lr растёт/фиксируется), затем экспоненциальный или inverse decay.
+- Для SGD/мини-батч часто используют inverse scaling или step decay.
+- Для быстрой и стабильной сходимости в большинстве задач — Adam или RMSProp (адаптивные алгоритмы) вместо вручную настроенных lr.
+- Не задавайте слишком резкое уменьшение lr в начале — это замедлит прогресс; уменьшайте плавно.
+
+Если хотите, могу:
+- Добавить warmup scheduler.
+- Добавить Adam/RMSProp реализации и интегрировать в BaseLoss/методику.
+- Внести patch прямо в ваш файл (уже предложил изменения — скажите, применять).
+
+IgorKalet: Как посчитать ошибку обученной регрессии на обучающей и тестовой выборке при помощи метода mean_squared_error из sklearn.metrics
+
+GitHub Copilot: Коротко: импортируете mean_squared_error, делаете predict на train и test и считаете MSE. Пример — вставьте в ваш скрипт:
+
+````python
+# python
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+import numpy as np
+
+# предположим, X, y — ваши данные; y может быть (n,1) или (n,)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+model = LinearRegression(loss= MSELoss(), lr=0.1)  # или ваша настроенная модель
+model.fit(X_train, y_train)
+
+# предсказания (убедитесь, что y_true и y_pred имеют одинаковую форму)
+y_train_pred = model.predict(X_train)
+y_test_pred  = model.predict(X_test)
+
+# если y имеют форму (n,1), привести к (n,)
+y_train_true = np.asarray(y_train).reshape(-1)
+y_test_true  = np.asarray(y_test).reshape(-1)
+y_train_pred = np.asarray(y_train_pred).reshape(-1)
+y_test_pred  = np.asarray(y_test_pred).reshape(-1)
+
+mse_train = mean_squared_error(y_train_true, y_train_pred)
+mse_test  = mean_squared_error(y_test_true,  y_test_pred)
+
+print("MSE train:", mse_train)
+print("MSE test: ", mse_test)
+
+# при желании RMSE:
+rmse_test = np.sqrt(mse_test)
+print("RMSE test:", rmse_test)
+````
+
+Замечания:
+- mean_squared_error по умолчанию возвращает среднюю квадратичную ошибку (squared=True).
+- Для воспроизводимости фиксируйте random_state в train_test_split.
+- Убедитесь, что model.predict возвращает одномерный массив (shape (n,)), иначе приведите reshape(-1).
+
+IgorKalet: Реализовать градиентный спуск на основе MSE с L2 регуляризацией
+
+GitHub Copilot: Добавил класс MSELossL2 с L2-регуляризацией (ridge). Регуляризация по умолчанию не включает bias (первый элемент w), коэффициент регуляризации — alpha, в loss добавляется 0.5 * alpha * ||w_reg||^2, в градиент — alpha * w_reg.
+
+````python
+# ...existing code...
+class MSELoss(BaseLoss):
+    def calc_loss(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
+        preds = X.dot(w)
+        mse = np.mean((preds - y) ** 2)
+        return mse
+
+    def calc_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
+        m = X.shape[0]
+        preds = X.dot(w)
+        err = preds - y
+        grad = 2 * X.T.dot(err) / float(m)
+        return grad
+
+# ...existing code...
+
+class MSELossL2(BaseLoss):
+    """
+    MSE + L2 (ridge) regularization.
+    loss = MSE + 0.5 * alpha * ||w_reg||^2
+    grad = grad_MSE + alpha * w_reg
+    По умолчанию bias (первый компонент w) не регуляризуется (reg_bias=False).
+    """
+    def __init__(self, alpha: float = 1e-3, reg_bias: bool = False):
+        self.alpha = float(alpha)
+        self.reg_bias = bool(reg_bias)
+
+    def calc_loss(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
+        preds = X.dot(w)
+        mse = np.mean((preds - y) ** 2)
+        if self.alpha == 0.0:
+            return mse
+        w_reg = w.copy()
+        if not self.reg_bias and w_reg.size > 0:
+            w_reg[0] = 0.0
+        reg_term = 0.5 * self.alpha * np.sum(w_reg ** 2)
+        return mse + reg_term
+
+    def calc_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
+        m = X.shape[0]
+        preds = X.dot(w)
+        err = preds - y
+        grad = 2 * X.T.dot(err) / float(m)
+        if self.alpha != 0.0:
+            w_reg = w.copy()
+            if not self.reg_bias and w_reg.size > 0:
+                w_reg[0] = 0.0
+            grad = grad + self.alpha * w_reg
+        return grad
+# ...existing code...
+````
+
+Пример использования:
+- Передать loss = MSELossL2(alpha=0.01) в LinearRegression для обучения с L2.
+
+IgorKalet: как с помощью mean_squared_error  можно оценить качество обучения модели
+
+GitHub Copilot: Коротко — mean_squared_error (sklearn.metrics) возвращает средний квадрат ошибки (MSE). Чем меньше MSE (и RMSE = sqrt(MSE)), тем лучше модель. Обычно считают и для обучающей, и для тестовой выборки, сравнивают (overfit если train << test). Пример использования:
+
+````python
+# python
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+import numpy as np
+
+# X, y — ваши данные; model — обученная модель с методом predict(X)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+model.fit(X_train, y_train)  # обучили модель
+
+y_train_pred = model.predict(X_train).reshape(-1)
+y_test_pred  = model.predict(X_test).reshape(-1)
+
+y_train_true = np.asarray(y_train).reshape(-1)
+y_test_true  = np.asarray(y_test).reshape(-1)
+
+mse_train = mean_squared_error(y_train_true, y_train_pred)
+mse_test  = mean_squared_error(y_test_true,  y_test_pred)
+
+rmse_train = np.sqrt(mse_train)
+rmse_test  = np.sqrt(mse_test)
+
+print("MSE train:", mse_train, "RMSE train:", rmse_train)
+print("MSE test: ", mse_test,  "RMSE test: ", rmse_test)
+````
+
+Советы по интерпретации:
+- RMSE в тех же единицах, что и y — удобно для понимания ошибки.
+- Сравнивайте train и test: большое отличие → возможен overfitting.
+- Для относительной оценки используйте Normalized RMSE (RMSE / (y.max()-y.min())) или RMSE / y.std().
+- Для оценки на k-fold кросс-валидации используйте sklearn.model_selection.cross_val_score с scoring='neg_mean_squared_error' (возвращает отрицательное MSE — берите минус и sqrt для RMSE).
+
+IgorKalet: Реализовать градиентный спуск на основе Huber Loss
+
+GitHub Copilot: ````python
+# ...existing code...
+class MSELoss(BaseLoss):
+    def calc_loss(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
+        preds = X.dot(w)
+        mse = np.mean((preds - y) ** 2)
+        return mse
+
+    def calc_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
+        m = X.shape[0]
+        preds = X.dot(w)
+        err = preds - y
+        grad = 2 * X.T.dot(err) / float(m)
+        return grad
+
+class HuberLoss(BaseLoss):
+    """
+    Huber loss (smooth L1). Parameter delta controls transition point:
+      L_delta(r) = 0.5 * r^2                 if |r| <= delta
+                 = delta * (|r| - 0.5*delta) if |r| >  delta
+    Loss returned is the average over samples.
+    Gradient is computed w.r.t. parameters w: grad = X^T * dL/dr / m,
+    where dL/dr = r (if |r|<=delta) or delta * sign(r) (otherwise).
+    Expects X to have bias column if you want bias in w.
+    """
+    def __init__(self, delta: float = 1.0):
+        self.delta = float(delta)
+
+    def calc_loss(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
+        preds = X.dot(w)
+        r = preds - y
+        abs_r = np.abs(r)
+        # vectorized huber per-sample
+        small_mask = abs_r <= self.delta
+        loss_vals = np.empty_like(r, dtype=float)
+        loss_vals[small_mask] = 0.5 * (r[small_mask] ** 2)
+        loss_vals[~small_mask] = self.delta * (abs_r[~small_mask] - 0.5 * self.delta)
+        return float(np.mean(loss_vals))
+
+    def calc_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
+        m = X.shape[0]
+        if m == 0:
+            return np.zeros_like(w)
+        preds = X.dot(w)
+        r = preds - y
+        # derivative dL/dr
+        grad_r = np.where(np.abs(r) <= self.delta, r, self.delta * np.sign(r))
+        grad = X.T.dot(grad_r) / float(m)
+        return grad
+# ...existing code...
+```# filepath: d:\test\git_my\sudy_ml\regression.py
+# ...existing code...
+class MSELoss(BaseLoss):
+    def calc_loss(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
+        preds = X.dot(w)
+        mse = np.mean((preds - y) ** 2)
+        return mse
+
+    def calc_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
+        m = X.shape[0]
+        preds = X.dot(w)
+        err = preds - y
+        grad = 2 * X.T.dot(err) / float(m)
+        return grad
+
+class HuberLoss(BaseLoss):
+    """
+    Huber loss (smooth L1). Parameter delta controls transition point:
+      L_delta(r) = 0.5 * r^2                 if |r| <= delta
+                 = delta * (|r| - 0.5*delta) if |r| >  delta
+    Loss returned is the average over samples.
+    Gradient is computed w.r.t. parameters w: grad = X^T * dL/dr / m,
+    where dL/dr = r (if |r|<=delta) or delta * sign(r) (otherwise).
+    Expects X to have bias column if you want bias in w.
+    """
+    def __init__(self, delta: float = 1.0):
+        self.delta = float(delta)
+
+    def calc_loss(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
+        preds = X.dot(w)
+        r = preds - y
+        abs_r = np.abs(r)
+        # vectorized huber per-sample
+        small_mask = abs_r <= self.delta
+        loss_vals = np.empty_like(r, dtype=float)
+        loss_vals[small_mask] = 0.5 * (r[small_mask] ** 2)
+        loss_vals[~small_mask] = self.delta * (abs_r[~small_mask] - 0.5 * self.delta)
+        return float(np.mean(loss_vals))
+
+    def calc_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
+        m = X.shape[0]
+        if m == 0:
+            return np.zeros_like(w)
+        preds = X.dot(w)
+        r = preds - y
+        # derivative dL/dr
+        grad_r = np.where(np.abs(r) <= self.delta, r, self.delta * np.sign(r))
+        grad = X.T.dot(grad_r) / float(m)
+        return grad
+# ...existing code...
