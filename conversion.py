@@ -67,7 +67,7 @@ for col in numerical_cols:
     train_X_processed[col] = (train_X_processed[col] - mean_val) / std_val
     test_X_processed[col] = (test_X_processed[col] - mean_val) / std_val
 
-def fitModel(loss: BaseLoss, caption: str):
+def fitModel(loss: BaseLoss, caption: str) -> LinearRegression:
     model = LinearRegression(loss=loss, lr=0.01)
     model.fit(train_X_processed, train_y)
 
@@ -79,6 +79,9 @@ def fitModel(loss: BaseLoss, caption: str):
 
     print(f"MSE {caption} train:", mse_train)
     print(f"MSE {caption} test: ", mse_test)
+    print(f"MSE {caption} r2: ", model.r2_score(test_X_processed, test_y))
+
+    return model
 
 
 loss = MSELoss()
@@ -113,3 +116,40 @@ fitModel(loss, 'L2 (0.1)')
 loss = MSEL2Loss(0.005)
 fitModel(loss, 'L2 (0.005)')
 
+class HuberLoss(BaseLoss):
+    """
+    Huber loss (smooth L1). Parameter delta controls transition point:
+      L_delta(r) = 0.5 * r^2                 if |r| <= delta
+                 = delta * (|r| - 0.5*delta) if |r| >  delta
+    Loss returned is the average over samples.
+    Gradient is computed w.r.t. parameters w: grad = X^T * dL/dr / m,
+    where dL/dr = r (if |r|<=delta) or delta * sign(r) (otherwise).
+    Expects X to have bias column if you want bias in w.
+    """
+    def __init__(self, delta: float = 1.0):
+        self.delta = float(delta)
+
+    def calc_loss(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
+        preds = X.dot(w)
+        r = preds - y
+        abs_r = np.abs(r)
+        # vectorized huber per-sample
+        small_mask = abs_r <= self.delta
+        loss_vals = np.empty_like(r, dtype=float)
+        loss_vals[small_mask] = 0.5 * (r[small_mask] ** 2)
+        loss_vals[~small_mask] = self.delta * (abs_r[~small_mask] - 0.5 * self.delta)
+        return float(np.mean(loss_vals))
+
+    def calc_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
+        m = X.shape[0]
+        if m == 0:
+            return np.zeros_like(w)
+        preds = X.dot(w)
+        r = preds - y
+        # derivative dL/dr
+        grad_r = np.where(np.abs(r) <= self.delta, r, self.delta * np.sign(r))
+        grad = X.T.dot(grad_r) / float(m)
+        return grad
+
+loss = HuberLoss(30)
+modelHL = fitModel(loss, 'HL (1)')
